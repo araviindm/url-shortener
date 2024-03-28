@@ -10,12 +10,9 @@ func main() {
 	router := gin.Default()
 	router.SetTrustedProxies(nil)
 
-	// Routes
-	apiGroup := router.Group("/api")
-	{
-		apiGroup.POST("/shorten", api.ShortenURL)
-		apiGroup.GET("/:shortURL", api.RedirectToOriginalURL)
-	}
+	router.POST("api/shorten", api.ShortenURL)
+	router.GET("/*shortURL", api.RedirectToOriginalURL)
+
 	if err := router.Run(":8080"); err != nil {
 		panic(err)
 	}
