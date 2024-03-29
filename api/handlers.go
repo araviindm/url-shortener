@@ -19,8 +19,7 @@ import (
 )
 
 var (
-	mutex       sync.Mutex          // Mutex to synchronize access to shared resources
-	redirectURL = make(chan string) // Channel for communicating redirection URLs
+	mutex sync.Mutex // Mutex to synchronize access to shared resources
 )
 
 type ShortenURLRequest struct {
@@ -119,7 +118,7 @@ func RedirectToOriginalURL(c *gin.Context) {
 	if err == nil {
 		log.Println("In Redis")
 
-		go processRedirect(c, longURL)
+		c.Redirect(http.StatusFound, longURL)
 		return
 	} else if err != redis.Nil {
 		log.Println("Redis error:", err)
@@ -159,9 +158,4 @@ func checkMongoForURL(shortURL string) (string, error) {
 		log.Println("Error while checking MongoDB for URL:", err)
 		return "", err
 	}
-}
-
-func processRedirect(c *gin.Context, longURL string) {
-	url := <-redirectURL
-	c.Redirect(http.StatusFound, url)
 }

@@ -1,8 +1,12 @@
 package main
 
 import (
+	"log"
+	"os"
+
 	"github.com/araviindm/url-shortener/api"
 	"github.com/gin-gonic/gin"
+	_ "github.com/joho/godotenv/autoload"
 )
 
 func main() {
@@ -13,7 +17,13 @@ func main() {
 	router.POST("api/shorten", api.ShortenURL)
 	router.GET("/*shortURL", api.RedirectToOriginalURL)
 
-	if err := router.Run(":8080"); err != nil {
+	PORT := ":" + os.Getenv("PORT")
+
+	if PORT == "" {
+		log.Fatal("PORT environment variable is not set")
+	}
+
+	if err := router.Run(PORT); err != nil {
 		panic(err)
 	}
 
