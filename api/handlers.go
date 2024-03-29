@@ -2,12 +2,13 @@ package api
 
 import (
 	"context"
-	"crypto/md5"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/araviindm/url-shortener/db"
 	"github.com/gin-gonic/gin"
@@ -15,6 +16,11 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+)
+
+var (
+	mutex       sync.Mutex          // Mutex to synchronize access to shared resources
+	redirectURL = make(chan string) // Channel for communicating redirection URLs
 )
 
 type ShortenURLRequest struct {
@@ -35,13 +41,28 @@ func ShortenURL(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON request"})
 		return
 	}
-	// Checking if the long URL exists in Redis cache or MongoDB
-	shortURL, err := checkURLExistence(req.LongURL)
+
+	// Long URL does not exist, generate short URL
+	shortURL := generateShortURL(req.LongURL)
+
+	mutex.Lock()         // Lock before accessing shared resources
+	defer mutex.Unlock() // Ensure mutex is released
+
+	// Cache the mapping in Redis
+	err := db.RedisClient.Set(context.Background(), shortURL, req.LongURL, 0).Err()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check URL existence"})
+		log.Println("Failed to store mapping in Redis:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate short URL"})
 		return
 	}
 
+	// Check if already exists
+	existingLongURL, err := checkMongoForURL(shortURL)
+	if err != nil {
+		log.Println("Error checking MongoDB for URL:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve original URL"})
+		return
+	}
 	// Construct the full URL and return it
 	scheme := c.Request.Header.Get("X-Forwarded-Proto")
 	if scheme == "" {
@@ -50,22 +71,12 @@ func ShortenURL(c *gin.Context) {
 	baseURL := scheme + "://" + c.Request.Host
 	fullURL := fmt.Sprintf("%s/%s", baseURL, shortURL)
 
-	if shortURL != "" {
+	if existingLongURL != "" {
+		log.Println("In Mongo")
 		c.JSON(http.StatusOK, gin.H{
 			"short_url": fullURL,
 			"long_url":  req.LongURL,
 		})
-		return
-	}
-
-	// Long URL does not exist, generate short URL
-	shortURL = generateShortURL(req.LongURL)
-
-	// Cache the mapping in Redis
-	err = db.RedisClient.Set(context.Background(), shortURL, req.LongURL, 0).Err()
-	if err != nil {
-		log.Println("Failed to store mapping in Redis:", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate short URL"})
 		return
 	}
 
@@ -77,7 +88,7 @@ func ShortenURL(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate short URL"})
 		return
 	}
-	fullURL = fmt.Sprintf("%s/%s", baseURL, shortURL)
+
 	c.JSON(http.StatusOK, gin.H{
 		"short_url": fullURL,
 		"long_url":  req.LongURL,
@@ -85,65 +96,30 @@ func ShortenURL(c *gin.Context) {
 }
 
 func generateShortURL(longURL string) string {
-	// Calculate MD5 hash of the long URL
-	hash := md5.Sum([]byte(longURL))
+	// Calculate SHA-256 hash of the long URL
+	hash := sha256.Sum256([]byte(longURL))
 
 	// Convert the hash to a hexadecimal string
 	hashString := hex.EncodeToString(hash[:])
 
-	// Take the first 8 characters of the hash string as the short URL
+	// Take the first 10 characters of the hash string as the short URL
 	shortURL := hashString[:10]
 	log.Println("Created")
 	return shortURL
 }
 
-func checkURLExistence(longURL string) (string, error) {
-
-	ctx := context.Background()
-
-	// Check if the long URL already exists in Redis cache
-	keys, err := db.RedisClient.Keys(ctx, "*").Result()
-	if err != nil {
-		log.Println("Redis error:", err)
-		return "", err
-	}
-
-	for _, key := range keys {
-		value, err := db.RedisClient.Get(ctx, key).Result()
-		if err != nil {
-			log.Println("Redis error:", err)
-			continue
-		}
-		if value == longURL {
-			log.Println("In Redis")
-			return key, nil
-		}
-	}
-
-	//  Check if the long URL already exists in MongoDB
-	collection := db.MongoClient.Collection("url_mappings")
-	var mapping URLLongShortMapping
-	err = collection.FindOne(ctx, bson.M{"long_url": longURL}).Decode(&mapping)
-	if err == nil {
-		log.Println("In Mongo")
-		return mapping.ShortURL, nil
-	} else if err != mongo.ErrNoDocuments {
-		log.Println("MongoDB error:", err)
-		return "", err
-	}
-	return "", nil
-}
-
 func RedirectToOriginalURL(c *gin.Context) {
 	shortURL := strings.TrimPrefix(c.Param("shortURL"), "/")
-	ctx := context.Background()
+
+	mutex.Lock()         // Lock before accessing shared resources
+	defer mutex.Unlock() // Ensure mutex is released
 
 	// Check Redis cache for the short URL mapping
-
-	longURL, err := db.RedisClient.Get(ctx, shortURL).Result()
+	longURL, err := db.RedisClient.Get(context.Background(), shortURL).Result()
 	if err == nil {
 		log.Println("In Redis")
-		c.Redirect(http.StatusFound, longURL)
+
+		go processRedirect(c, longURL)
 		return
 	} else if err != redis.Nil {
 		log.Println("Redis error:", err)
@@ -151,21 +127,41 @@ func RedirectToOriginalURL(c *gin.Context) {
 		return
 	}
 
-	// Short URL mapping not found in Redis, check MongoDB
-	collection := db.MongoClient.Collection("url_mappings")
-	var mapping URLLongShortMapping
-	err = collection.FindOne(ctx, bson.M{"short_url": shortURL}).Decode(&mapping)
-	if err == nil {
-		log.Println("In Mongo")
-		c.Redirect(http.StatusFound, mapping.LongURL)
-		return
-	} else if err != mongo.ErrNoDocuments {
-		log.Println("MongoDB error:", err)
+	existingLongURL, err := checkMongoForURL(shortURL)
+	if err != nil {
+		log.Println("Error checking MongoDB for URL:", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve original URL"})
 		return
-	} else {
-		log.Println("MongoDB error:", err)
 	}
 
+	if existingLongURL != "" {
+		log.Println("In Mongo")
+		c.Redirect(http.StatusFound, existingLongURL)
+		return
+	}
+
+	// Short URL mapping not found in Redis, check MongoDB
+
 	c.JSON(http.StatusNotFound, gin.H{"error": "Short URL not found"})
+}
+
+func checkMongoForURL(shortURL string) (string, error) {
+	collection := db.MongoClient.Collection("url_mappings")
+	var mapping URLLongShortMapping
+	err := collection.FindOne(context.Background(), bson.M{"short_url": shortURL}).Decode(&mapping)
+	if err == nil {
+		log.Println("Short URL exists in MongoDB")
+		return mapping.LongURL, nil
+	} else if err == mongo.ErrNoDocuments {
+		log.Println("Short URL does not exist in MongoDB")
+		return "", nil
+	} else {
+		log.Println("Error while checking MongoDB for URL:", err)
+		return "", err
+	}
+}
+
+func processRedirect(c *gin.Context, longURL string) {
+	url := <-redirectURL
+	c.Redirect(http.StatusFound, url)
 }
