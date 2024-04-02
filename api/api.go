@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 
@@ -39,6 +40,11 @@ type Result struct {
 }
 
 func ShortenURL(c *gin.Context) {
+	PORT := os.Getenv("PORT")
+
+	if PORT == "" {
+		log.Fatal("PORT environment variable is not set")
+	}
 	var req ShortenURLRequest
 
 	// Parsing JSON request body
@@ -48,7 +54,7 @@ func ShortenURL(c *gin.Context) {
 	}
 
 	// Long URL does not exist, generate short URL
-	shortURL := generateShortURL(req.LongURL)
+	shortURL := GenerateShortURL(req.LongURL)
 
 	mutex.Lock()         // Lock before accessing shared resources
 	defer mutex.Unlock() // Ensure mutex is released
@@ -83,18 +89,13 @@ func ShortenURL(c *gin.Context) {
 	if mongoResp.Err != nil {
 		log.Println("Error checking MongoDB for URL", mongoResp.Err)
 	}
-	// Construct the full URL and return it
-	scheme := c.Request.Header.Get("X-Forwarded-Proto")
-	if scheme == "" {
-		scheme = "http" // Default to HTTP if X-Forwarded-Proto header is not set
-	}
-	baseURL := scheme + "://" + c.Request.Host
-	fullURL := fmt.Sprintf("%s/%s", baseURL, shortURL)
+
+	shortURL = fmt.Sprintf("http://localhost:%s/%s", PORT, shortURL) // Should do it differently if it's deployed on a server
 
 	if mongoResp.LongURL != "" {
 		log.Println("In Mongo")
 		c.JSON(http.StatusOK, gin.H{
-			"short_url": fullURL,
+			"short_url": shortURL,
 			"long_url":  req.LongURL,
 		})
 		return
@@ -117,12 +118,12 @@ func ShortenURL(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"short_url": fullURL,
+		"short_url": shortURL,
 		"long_url":  req.LongURL,
 	})
 }
 
-func generateShortURL(longURL string) string {
+func GenerateShortURL(longURL string) string {
 	// Calculate SHA-256 hash of the long URL
 	hash := sha256.Sum256([]byte(longURL))
 
@@ -136,6 +137,7 @@ func generateShortURL(longURL string) string {
 }
 
 func RedirectToOriginalURL(c *gin.Context) {
+	log.Println("Ran")
 	shortURL := strings.TrimPrefix(c.Param("shortURL"), "/")
 
 	mutex.Lock()         // Lock before accessing shared resources
