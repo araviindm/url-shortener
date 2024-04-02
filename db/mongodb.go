@@ -29,6 +29,11 @@ func init() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	MONGODB_NAME := os.Getenv("MONGODB_NAME")
 
-	MongoClient = client.Database("URLShortener")
+	if MONGODB_NAME == "" {
+		log.Fatal("MONGO_URI environment variable is not set")
+	}
+
+	MongoClient = client.Database(MONGODB_NAME)
 }
