@@ -5,6 +5,12 @@
 - Create a redis database and retrive the REDIS_ADDR, and REDIS_PASSWORD.
 - Create a database (URLShortener) in a mongodb cluster and retrive the MONGO_URI, and MONGODB_NAME.
 
+## To download the packages
+
+```bash
+go mod download
+```
+
 ## .env file
 
 ```bash
